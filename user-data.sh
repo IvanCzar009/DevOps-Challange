@@ -15,15 +15,26 @@ echo "========================================="
 # Change to ec2-user home directory
 cd /home/ec2-user
 
-# Copy all installation scripts using SCP or create them inline
-echo "Setting up installation scripts..."
+# Download all scripts from GitHub
+echo "Downloading installation scripts from GitHub..."
+GITHUB_REPO_URL="https://raw.githubusercontent.com/IvanCzar009/DevOps-Challange/main"
 
-# Make all scripts executable (files will be copied via SCP after instance launch)
+# Download essential scripts
+curl -s -O "${GITHUB_REPO_URL}/install-dependencies.sh"
+curl -s -O "${GITHUB_REPO_URL}/install-tools.sh"
+curl -s -O "${GITHUB_REPO_URL}/install-elk.sh"
+curl -s -O "${GITHUB_REPO_URL}/install-gitlab.sh"
+curl -s -O "${GITHUB_REPO_URL}/install-tomcat.sh"
+curl -s -O "${GITHUB_REPO_URL}/install-sonarqube.sh"
+curl -s -O "${GITHUB_REPO_URL}/integration-helper.sh"
+curl -s -O "${GITHUB_REPO_URL}/complete-setup.sh"
+
+# Make all scripts executable
 echo "Making installation scripts executable..."
-find . -name "*.sh" -exec chmod +x {} \;
+chmod +x *.sh
 
-# Step 1: Install all system dependencies
-echo "Step 1: Installing system dependencies..."
+# Run installation scripts
+echo "Starting dependency installation..."
 ./install-dependencies.sh
 
 # Step 2: Install DevOps tools

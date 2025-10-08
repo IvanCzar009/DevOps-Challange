@@ -1,0 +1,467 @@
+# GitLab CI/CD Pipeline for Group 6 React App with SonarQube Integration
+
+stages:
+  - build
+  - test
+  - quality
+  - package
+  - deploy
+  - monitor
+
+variables:
+  NODE_VERSION: "18"
+  APP_NAME: "group6-react-app"
+  SONAR_URL: "http://localhost:9000"
+  TOMCAT_URL: "http://localhost:8083"
+  KIBANA_URL: "http://localhost:5061"
+  
+# Cache for faster builds
+cache:
+  paths:
+    - node_modules/
+    - .npm/
+
+# Build stage
+build:
+  stage: build
+  image: node:18-alpine
+  before_script:
+    - npm ci --cache .npm --prefer-offline
+  script:
+    - echo "Building React application..."
+    - npm run build
+    - echo "Build completed at $(date)"
+  artifacts:
+    paths:
+      - build/
+    expire_in: 1 hour
+  only:
+    - main
+    - develop
+
+# Test stage with coverage
+test:
+  stage: test
+  image: node:18-alpine
+  before_script:
+    - npm ci --cache .npm --prefer-offline
+  script:
+    - echo "Running React tests with coverage..."
+    - npm test -- --coverage --watchAll=false --testResultsProcessor=jest-sonar-reporter
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 1 hour
+  coverage: '/Lines\s*:\s*(\d+\.\d+)%/'
+
+# SonarQube quality analysis
+quality:
+  stage: quality
+  image: sonarsource/sonar-scanner-cli:latest
+  dependencies:
+    - test
+  script:
+    - echo "Running SonarQube analysis..."
+    - sonar-scanner
+      -Dsonar.projectKey=$APP_NAME
+      -Dsonar.sources=src
+      -Dsonar.host.url=$SONAR_URL
+      -Dsonar.login=$SONAR_TOKEN
+      -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+      -Dsonar.coverage.exclusions="**/*.test.js,**/*.spec.js,**/node_modules/**"
+      -Dsonar.testExecutionReportPaths=test-report.xml
+  allow_failure: true
+  only:
+    - main
+    - develop
+
+# Package as WAR file
+package:
+  stage: package
+  image: maven:3.6.3-openjdk-11
+  dependencies:
+    - build
+  before_script:
+    - apt-get update && apt-get install -y curl
+  script:
+    - echo "Creating WAR package structure..."
+    - mkdir -p war-build/WEB-INF
+    - cp -r build/* war-build/
+    
+    # Create web.xml
+    - |
+      cat > war-build/WEB-INF/web.xml << 'EOF'
+      <?xml version="1.0" encoding="UTF-8"?>
+      <web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee
+               http://xmlns.jcp.org/xml/ns/javaee/web-app_4_0.xsd"
+               version="4.0">
+          <display-name>Group 6 React Application</display-name>
+          <welcome-file-list>
+              <welcome-file>index.html</welcome-file>
+          </welcome-file-list>
+          <error-page>
+              <error-code>404</error-code>
+              <location>/index.html</location>
+          </error-page>
+      </web-app>
+      EOF
+    
+    # Create Maven pom.xml
+    - |
+      cat > war-build/pom.xml << 'EOF'
+      <?xml version="1.0" encoding="UTF-8"?>
+      <project xmlns="http://maven.apache.org/POM/4.0.0"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+               http://maven.apache.org/xsd/maven-4.0.0.xsd">
+          <modelVersion>4.0.0</modelVersion>
+          <groupId>com.devops</groupId>
+          <artifactId>group6-react-app</artifactId>
+          <version>1.0.${CI_PIPELINE_ID}</version>
+          <packaging>war</packaging>
+          <name>Group 6 React Application</name>
+          <build>
+              <finalName>group6-react-app</finalName>
+              <plugins>
+                  <plugin>
+                      <groupId>org.apache.maven.plugins</groupId>
+                      <artifactId>maven-war-plugin</artifactId>
+                      <version>3.2.3</version>
+                      <configuration>
+                          <webXml>WEB-INF\web.xml</webXml>
+                      </configuration>
+                  </plugin>
+              </plugins>
+          </build>
+      </project>
+      EOF
+    
+    - cd war-build
+    - mvn clean package -q
+    - echo "WAR file created: $(ls -la target/*.war)"
+  artifacts:
+    paths:
+      - war-build/target/*.war
+    expire_in: 1 hour
+  only:
+    - main
+
+# Deploy to Tomcat
+deploy:
+  stage: deploy
+  image: curlimages/curl:latest
+  dependencies:
+    - package
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - echo "Deploying to Tomcat server..."
+    - WAR_FILE=$(find war-build/target -name "*.war" | head -n 1)
+    - echo "Deploying file: $WAR_FILE"
+    
+    # Undeploy existing application
+    - |
+      curl -f -u $TOMCAT_USER:$TOMCAT_PASSWORD \
+           "$TOMCAT_URL/manager/text/undeploy?path=/$APP_NAME" || echo "App not previously deployed"
+    
+    # Deploy new WAR file
+    - |
+      curl -f -u $TOMCAT_USER:$TOMCAT_PASSWORD \
+           -T "$WAR_FILE" \
+           "$TOMCAT_URL/manager/text/deploy?path=/$APP_NAME&update=true"
+    
+    # Wait and verify deployment
+    - sleep 15
+    - HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$TOMCAT_URL/$APP_NAME")
+    - echo "Deployment verification - HTTP Status: $HTTP_STATUS"
+    
+    # Log deployment to ELK
+    - |
+      DEPLOYMENT_LOG=$(cat << EOF
+      {
+        "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)",
+        "application": "$APP_NAME",
+        "pipeline_id": "$CI_PIPELINE_ID",
+        "commit_sha": "$CI_COMMIT_SHA",
+        "branch": "$CI_COMMIT_REF_NAME",
+        "status": "$([ "$HTTP_STATUS" = "200" ] && echo "SUCCESS" || echo "FAILED")",
+        "app_url": "$TOMCAT_URL/$APP_NAME",
+        "http_status": $HTTP_STATUS,
+        "deployment_time": "$(date)"
+      }
+      EOF
+      )
+    - echo "$DEPLOYMENT_LOG" | curl -X POST "http://localhost:5044" -H "Content-Type: application/json" -d @- || echo "Failed to log to ELK"
+    
+    - |
+      if [ "$HTTP_STATUS" = "200" ]; then
+        echo "✅ Deployment successful! App is running at: $TOMCAT_URL/$APP_NAME"
+      else
+        echo "❌ Deployment failed. HTTP Status: $HTTP_STATUS"
+        exit 1
+      fi
+  environment:
+    name: production
+    url: $TOMCAT_URL/$APP_NAME
+  only:
+    - main
+
+# Monitor deployment
+monitor:
+  stage: monitor
+  image: curlimages/curl:latest
+  script:
+    - echo "Monitoring application health..."
+    - for i in {1..5}; do
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$TOMCAT_URL/$APP_NAME");
+        echo "Health check $i: HTTP $HTTP_STATUS";
+        if [ "$HTTP_STATUS" = "200" ]; then
+          echo "✅ Application is healthy";
+          break;
+        else
+          echo "⚠️ Application unhealthy, retrying...";
+          sleep 10;
+        fi;
+      done
+    
+    # Generate deployment report
+    - |
+      cat > deployment-report-$CI_PIPELINE_ID.json << EOF
+      {
+        "pipeline_id": "$CI_PIPELINE_ID",
+        "commit": "$CI_COMMIT_SHA",
+        "branch": "$CI_COMMIT_REF_NAME",
+        "application": "$APP_NAME",
+        "deployment_time": "$(date)",
+        "status": "$([ "$HTTP_STATUS" = "200" ] && echo "SUCCESS" || echo "FAILED")",
+        "urls": {
+          "application": "$TOMCAT_URL/$APP_NAME",
+          "tomcat_manager": "$TOMCAT_URL/manager",
+          "sonarqube": "$SONAR_URL/dashboard?id=$APP_NAME",
+          "kibana": "$KIBANA_URL"
+        }
+      }
+      EOF
+    - cat deployment-report-$CI_PIPELINE_ID.json
+  artifacts:
+    reports:
+      deployment: deployment-report-$CI_PIPELINE_ID.json
+    expire_in: 1 week
+  when: always
+  TOMCAT_PATH: "/opt/tomcat/webapps"
+  SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  GIT_DEPTH: "0"
+
+# Build Stage
+build:
+  stage: build
+  image: node:${NODE_VERSION}
+  before_script:
+    - cd group6-react-app
+    - npm ci --cache .npm --prefer-offline
+  script:
+    - npm run build
+    - echo "Build completed at $(date)" > build/build-info.txt
+    - echo "Commit: $CI_COMMIT_SHA" >> build/build-info.txt
+    - echo "Branch: $CI_COMMIT_REF_NAME" >> build/build-info.txt
+  artifacts:
+    paths:
+      - group6-react-app/build/
+    expire_in: 1 hour
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - group6-react-app/.npm/
+
+# Test Stage
+test:
+  stage: test
+  image: node:${NODE_VERSION}
+  before_script:
+    - cd group6-react-app
+    - npm ci --cache .npm --prefer-offline
+  script:
+    - npm test -- --coverage --watchAll=false
+    - echo "Tests completed successfully"
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: group6-react-app/coverage/cobertura-coverage.xml
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - group6-react-app/.npm/
+
+# Quality Stage - SonarQube Analysis
+sonarqube-check:
+  stage: quality
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - cd group6-react-app
+    - sonar-scanner
+      -Dsonar.projectKey=group6-react-app
+      -Dsonar.sources=src
+      -Dsonar.host.url=$SONAR_HOST_URL
+      -Dsonar.login=$SONAR_TOKEN
+      -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+      -Dsonar.testExecutionReportPaths=coverage/test-reporter.xml
+      -Dsonar.coverage.exclusions="**/*.test.js,**/*.test.jsx,**/setupTests.js"
+      -Dsonar.cpd.exclusions="**/*.test.js,**/*.test.jsx"
+  dependencies:
+    - test
+  allow_failure: true
+  only:
+    - main
+    - master
+    - merge_requests
+
+# Package Stage - Create WAR file for Tomcat
+package:
+  stage: package
+  image: openjdk:11-jdk
+  dependencies:
+    - build
+  script:
+    - cd group6-react-app/build
+    - mkdir -p WEB-INF
+    - |
+      cat > WEB-INF/web.xml << 'EOF'
+      <?xml version="1.0" encoding="UTF-8"?>
+      <web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee
+               http://xmlns.jcp.org/xml/ns/javaee/web-app_4_0.xsd"
+               version="4.0">
+        <display-name>Group6 React App</display-name>
+        <welcome-file-list>
+          <welcome-file>index.html</welcome-file>
+        </welcome-file-list>
+      </web-app>
+      EOF
+    - jar -cf ../group6-react.war *
+    - echo "WAR file created: group6-react.war"
+    - ls -la ../group6-react.war
+  artifacts:
+    paths:
+      - group6-react-app/group6-react.war
+    expire_in: 1 day
+
+# Deploy Stage - Deploy to Tomcat
+deploy:
+  stage: deploy
+  image: alpine:latest
+  dependencies:
+    - package
+  before_script:
+    - apk add --no-cache openssh-client sshpass
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H $DEPLOY_SERVER >> ~/.ssh/known_hosts
+  script:
+    - echo "Deploying to Tomcat server..."
+    - scp group6-react-app/group6-react.war ec2-user@$DEPLOY_SERVER:/tmp/
+    - |
+      ssh ec2-user@$DEPLOY_SERVER << 'EOF'
+        sudo systemctl stop tomcat
+        sudo rm -f /opt/tomcat/webapps/group6-react.war
+        sudo rm -rf /opt/tomcat/webapps/group6-react/
+        sudo cp /tmp/group6-react.war /opt/tomcat/webapps/
+        sudo chown tomcat:tomcat /opt/tomcat/webapps/group6-react.war
+        sudo systemctl start tomcat
+        echo "Waiting for deployment..."
+        sleep 30
+        curl -f http://localhost:8083/group6-react/ || echo "App might still be deploying"
+        echo "Deployment completed"
+      EOF
+    - echo "Application deployed successfully!"
+    - echo "Access the app at: http://$DEPLOY_SERVER:8083/group6-react/"
+  environment:
+    name: production
+    url: http://$DEPLOY_SERVER:8083/group6-react/
+  only:
+    - main
+    - master
+
+# Monitoring Stage - Send logs to ELK Stack and update SonarQube
+monitor_deployment:
+  stage: monitor
+  image: curlimages/curl:latest
+  script:
+    # Send deployment logs to ELK
+    - |
+      curl -X POST "http://$DEPLOY_SERVER:9200/gitlab-ci-logs/_doc" \
+           -H "Content-Type: application/json" \
+           -d '{
+             "timestamp": "'$(date -Iseconds)'",
+             "project": "'$CI_PROJECT_NAME'",
+             "pipeline_id": "'$CI_PIPELINE_ID'",
+             "job_id": "'$CI_JOB_ID'",
+             "commit": "'$CI_COMMIT_SHA'",
+             "branch": "'$CI_COMMIT_REF_NAME'",
+             "status": "deployed",
+             "stage": "production",
+             "user": "'$GITLAB_USER_LOGIN'",
+             "environment": "production",
+             "deployment_url": "http://'$DEPLOY_SERVER':8083/group6-react/"
+           }' || echo "ELK logging failed, continuing..."
+    
+    # Test application health
+    - |
+      sleep 10
+      if curl -f "http://$DEPLOY_SERVER:8083/group6-react/" > /dev/null 2>&1; then
+        STATUS="healthy"
+      else
+        STATUS="unhealthy"
+      fi
+      
+      # Log health check to ELK
+      curl -X POST "http://$DEPLOY_SERVER:9200/app-health-logs/_doc" \
+           -H "Content-Type: application/json" \
+           -d '{
+             "timestamp": "'$(date -Iseconds)'",
+             "application": "group6-react",
+             "status": "'$STATUS'",
+             "url": "http://'$DEPLOY_SERVER':8083/group6-react/",
+             "pipeline_id": "'$CI_PIPELINE_ID'"
+           }' || echo "Health check logging failed"
+      
+      echo "Application health status: $STATUS"
+  when: always
+  allow_failure: true
+
+# Performance test (optional)
+performance_test:
+  stage: monitor
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - echo "Running basic performance checks..."
+    - |
+      for i in {1..5}; do
+        echo "Test $i:"
+        time curl -s "http://$DEPLOY_SERVER:8083/group6-react/" > /dev/null
+        sleep 2
+      done
+  when: manual
+  allow_failure: true
