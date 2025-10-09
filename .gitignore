@@ -1,0 +1,69 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+terraform.tfplan
+terraform.tfplan.*
+
+# AWS credentials and sensitive files
+*.pem
+*.key
+.aws/
+credentials
+
+# Environment variables (contains sensitive data)
+.env
+.env.local
+.env.production
+.env.staging
+
+# Logs
+*.log
+logs/
+/var/log/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Docker volumes and data
+docker-data/
+volumes/
+
+# Backup files
+*.backup
+*.bak
+
+# Node modules (if any)
+node_modules/
+npm-debug.log*
+
+# Python files (if any)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
