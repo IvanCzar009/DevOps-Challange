@@ -99,21 +99,64 @@ resource "aws_instance" "elk_terraform_instance" {
     volume_type = "gp3"
   }
 
-  user_data = base64encode(templatefile("${path.module}/scripts/user-data.sh", {
-    jenkins_user        = var.jenkins_user
-    jenkins_password    = var.jenkins_password
-    sonarqube_user     = var.sonarqube_user
-    sonarqube_password = var.sonarqube_password
-    tomcat_username    = var.tomcat_username
-    tomcat_password    = var.tomcat_password
-  }))
-
   tags = {
     Name = var.instance_name
   }
 
-  # Wait for instance to be ready
-  provisioner "local-exec" {
-    command = "echo 'Instance ${self.public_ip} is being configured...'"
+  # Connection settings for remote-exec
+  connection {
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = file("${path.module}/Pair06.pem")
+    host        = self.public_ip
+    timeout     = "10m"
+  }
+
+  # Copy all scripts to the instance
+  provisioner "file" {
+    source      = "${path.module}/scripts/"
+    destination = "/tmp/scripts"
+  }
+
+  # Execute the installation
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum update -y",
+      "sudo yum install -y docker git wget curl jq nc",
+      "sudo systemctl start docker",
+      "sudo systemctl enable docker",
+      "sudo usermod -a -G docker ec2-user",
+      
+      # Install Docker Compose
+      "sudo curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/bin/docker-compose",
+      "sudo chmod +x /usr/local/bin/docker-compose",
+      "sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose",
+      
+      # Set up directories and environment
+      "sudo mkdir -p /opt/elk-terraform/{config,logs,data,scripts}",
+      "sudo cp -r /tmp/scripts/* /opt/elk-terraform/scripts/",
+      "sudo chmod +x /opt/elk-terraform/scripts/*.sh",
+      
+      # Create environment file
+      "sudo tee /opt/elk-terraform/.env << EOF",
+      "JENKINS_USER=${var.jenkins_user}",
+      "JENKINS_PASSWORD=${var.jenkins_password}",
+      "SONARQUBE_USER=${var.sonarqube_user}",
+      "SONARQUBE_PASSWORD=${var.sonarqube_password}",
+      "TOMCAT_USERNAME=${var.tomcat_username}",
+      "TOMCAT_PASSWORD=${var.tomcat_password}",
+      "EOF",
+      
+      # Change ownership
+      "sudo chown -R ec2-user:ec2-user /opt/elk-terraform",
+      
+      # Start the installation (run in background and redirect output)
+      "cd /opt/elk-terraform",
+      "nohup sudo /opt/elk-terraform/scripts/install.sh > /var/log/elk-terraform-install.log 2>&1 &",
+      
+      # Wait a moment for the process to start
+      "sleep 10",
+      "echo 'Installation started in background. Check /var/log/elk-terraform-install.log for progress.'"
+    ]
   }
 }

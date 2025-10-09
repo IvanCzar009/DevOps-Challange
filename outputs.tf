@@ -61,7 +61,20 @@ output "access_info" {
 ├── SonarQube:  ${var.sonarqube_user}/${var.sonarqube_password}
 └── Tomcat:     ${var.tomcat_username}/${var.tomcat_password}
 
-⏱️  Services are starting up... Please wait 5-10 minutes for full initialization.
-💡 Check Jenkins for the auto-created 'group6-react-app-pipeline' job!
+⏱️  Services are installing in background...
+📋 Monitor progress: ssh -i Pair06.pem ec2-user@${aws_instance.elk_terraform_instance.public_ip} "tail -f /var/log/elk-terraform-install.log"
+🔍 Check status: ssh -i Pair06.pem ec2-user@${aws_instance.elk_terraform_instance.public_ip} "/opt/elk-terraform/scripts/status-check.sh"
+
+💡 Installation takes ~20-30 minutes. Check Jenkins for the auto-created 'group6-react-app-pipeline' job!
 EOT
+}
+
+output "ssh_command" {
+  description = "SSH command to connect to the instance"
+  value       = "ssh -i Pair06.pem ec2-user@${aws_instance.elk_terraform_instance.public_ip}"
+}
+
+output "monitor_installation" {
+  description = "Command to monitor installation progress"
+  value       = "ssh -i Pair06.pem ec2-user@${aws_instance.elk_terraform_instance.public_ip} 'tail -f /var/log/elk-terraform-install.log'"
 }
